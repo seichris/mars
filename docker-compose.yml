@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    environment:
+      PORT: 8000
+    expose:
+      - "8000"
+
+  nginx:
+    image: nginx:alpine
+    depends_on:
+      - app
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx-cache:/var/cache/nginx
+
+volumes:
+  nginx-cache:

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <n>Mars Topo 7m Relief Map</n>
+    <description>
+      <![CDATA[
+	       Colored and shaded relief map of Mars, 7m global resolution. Derived from Murray Lab 5m global CTX collage. Casey Handmer 2026.
+	       
+	       <br/><br/>
+	       
+	       <a href="https://caseyhandmer.wordpress.com/2024/02/16/global-terrain-map-of-mars-at-7-m-resolution/">More information about this dataset</a>
+      ]]>
+</description>
+    <Style>
+      <ListStyle id="hideChildren">
+        <listItemType>checkHideChildren</listItemType>
+      </ListStyle>
+    </Style>
+    <NetworkLink>
+      <n>0/0/0</n>
+      <Region>
+        <LatLonAltBox>
+          <north>90.00000000</north>
+          <south>-90.00000000</south>
+          <east>180.00000000</east>
+          <west>-180.00000000</west>
+        </LatLonAltBox>
+        <Lod>
+          <minLodPixels>128</minLodPixels>
+          <maxLodPixels>-1</maxLodPixels>
+        </Lod>
+      </Region>
+      <Link>
+        <href>https://pub-3c6ee3900f804513bd3b2a3e4df337bd.r2.dev/0/0/0.kml</href>
+        <viewRefreshMode>onRegion</viewRefreshMode>
+      </Link>
+    </NetworkLink>
+  </Document>
+</kml>
