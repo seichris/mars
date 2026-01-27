@@ -1,35 +1,40 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>View Mars Topo (CesiumJS)</title>
-    <link rel="stylesheet" href="./styles.css" />
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/cesium@1.118.0/Build/Cesium/Widgets/widgets.css"
-    />
-  </head>
-  <body>
-    <div id="cesiumContainer"></div>
-    <div id="hud">
-      <div class="title">Mars Topo 7m Relief</div>
-      <div class="subtitle">
-        Imagery tiles from <span id="tileHost"></span>. Local descriptor:
-        <code>MarsTopo7mRelief.kml</code>.
-      </div>
-      <div id="status" class="status"></div>
-      <div class="links">
-        <a
-          href="https://caseyhandmer.wordpress.com/2024/02/16/global-terrain-map-of-mars-at-7-m-resolution/"
-          target="_blank"
-          rel="noreferrer"
-          >Dataset info</a
-        >
-      </div>
-    </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/cesium@1.118.0/Build/Cesium/Cesium.js"></script>
-    <script src="./main.js"></script>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mars</title>
+  <link rel="icon" href="/assets/favicon.ico" />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.118.0/Build/Cesium/Widgets/widgets.css" />
+</head>
+
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="hud">
+    <div class="title">Mars</div>
+    <div class="subtitle">
+      Imagery tiles from <span id="tileHost"></span>. Local descriptor:
+      <code>assets/MarsTopo7mRelief.kml</code>.
+    </div>
+    <div id="status" class="status"></div>
+    <div class="controls">
+      <a href="#" id="toggleIonMars">Enable DEM terrain (ion)</a>
+      <span id="ionMarsState" class="pill">off</span>
+    </div>
+    <div id="ionMarsHint" class="hint">
+      Uses uploaded DEM terrain with Handmer imagery. Zoom in + tilt to see relief.
+    </div>
+    <div class="links">
+      <a href="https://caseyhandmer.wordpress.com/2024/02/16/global-terrain-map-of-mars-at-7-m-resolution/"
+        target="_blank" rel="noreferrer">Dataset info</a>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.118.0/Build/Cesium/Cesium.js"></script>
+  <script src="/config.js"></script>
+  <script src="./main.js"></script>
+</body>
+
 </html>

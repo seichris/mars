@@ -1,6 +1,7 @@
 html,
 body,
-#cesiumContainer {
+#cesiumContainer,
+#cesiumTerrainContainer {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -9,10 +10,32 @@ body,
   background: #000;
 }
 
+#cesiumTerrainContainer,
+#cesiumContainer {
+  position: absolute;
+  inset: 0;
+}
+
+#cesiumTerrainContainer {
+  z-index: 0;
+  display: none;
+}
+
+#cesiumContainer {
+  z-index: 1;
+  background: transparent;
+}
+
+.cesium-viewer-bottom,
+.cesium-widget-credits {
+  display: none !important;
+}
+
 #hud {
   position: absolute;
   top: 12px;
   left: 12px;
+  z-index: 10;
   max-width: min(520px, calc(100vw - 24px));
   padding: 10px 12px;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -51,6 +74,36 @@ body,
 
 #hud .links {
   margin-top: 8px;
+}
+
+#hud .controls {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#hud .pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#hud .pill.on {
+  border-color: rgba(130, 200, 255, 0.45);
+  background: rgba(130, 200, 255, 0.12);
+}
+
+#hud .hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
 }
 
 #hud a {
