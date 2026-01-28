@@ -61,18 +61,25 @@ Scaling:
 ### Terrain Physics (COG heightmap)
 
 Physics terrain is built from a COG heightmap into `cannon-es` Trimesh chunks.
-Chunks are loaded around the car; when a chunk is missing, the car can fall through.
 
 URL params (override defaults):
-- `pchunk` (meters per physics chunk, default `300`)
-- `pseg` (segments per chunk edge, default `24`)
-- `pradius` (chunk radius around car, default `2`)
+- `pchunk` (meters per physics chunk, default `400`)
+- `pseg` (segments per chunk edge, default depends on car scale; usually `6`)
+- `pradius` (chunk radius around car, default `4`)
+- `pprefetch` (startup prefetch radius, default `12`)
+- `pahead` (forward prefetch radius when moving, default `pradius + 2`)
 - `origin` (floating origin threshold in meters, default `1200`)
 
 Notes:
 - Larger `pradius` loads more chunks (fewer gaps, more CPU/memory).
 - Larger `pchunk` reduces chunk count but lowers detail unless you also raise `pseg`.
 - Smaller `pseg` is faster but creates “steppy” terrain.
+- Floating-origin shifts move all physics bodies; `drive.js` forces AABB updates so wheel raycasts keep hitting terrain.
+
+### Visual Tile LOD
+
+By default we render only the highest imagery level (equivalent to `?level10Only=1`) to avoid multi-LOD stacking artifacts.
+To re-enable multi-LOD rendering: `?level10Only=0&lod=4`.
 
 ### Debugging
 
@@ -81,6 +88,7 @@ Enable physics debug overlays:
 - `?wheels=1` shows wheel meshes.
 
 Logs include wheel ray hits, chunk readiness, and “car below terrain” warnings.
+For high-signal event dumps around failures: `?debugEvents=1&eventDump=120&eventBuf=1200&eventVerbose=1`.
 
 ## Deploy with Docker
 
@@ -104,5 +112,6 @@ Cybertruck model: https://sketchfab.com/3d-models/teslas-cyber-truck-low-poly-d5
 
 ## Roadmap
 
+- More fun car physics
 - [Terraform Mars and sail a boat on its lakes](https://caseyhandmer.wordpress.com/2022/07/12/how-to-terraform-mars-for-10b-in-10-years/)
 - Actually using CJHandmer's terrain data, additionally to the imagery tiles

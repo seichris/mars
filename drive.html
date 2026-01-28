@@ -17,31 +17,34 @@
 <body>
   <div id="app"></div>
   <div id="hud">
-    <div class="title">Mars Drive</div>
-    <div id="status" class="status">Loading assets…</div>
-    <div class="row"><span>Speed</span><span id="speed">0</span></div>
-    <div class="row"><span>Coords</span><span id="coords">0, 0</span></div>
-    <div class="row"><span>Input</span><span id="input">-</span></div>
-    <div class="row"><span>Gear</span><span id="gear">D</span></div>
-    <!-- Terrain is now auto-enabled
-    <div class="controls">
-      <a href="#" id="toggleIonTerrain">Enable Mars terrain (ion)</a>
-      <span id="ionTerrainState" class="pill">off</span>
+    <button id="hudToggle" class="hud-toggle" type="button" aria-label="Minimize HUD">-</button>
+    <div class="hud-content">
+      <div class="title">Mars Drive</div>
+      <div id="status" class="status">Loading assets…</div>
+      <div class="row"><span>Speed</span><span id="speed">0</span></div>
+      <div class="row"><span>Coords</span><span id="coords">0, 0</span></div>
+      <!-- <div class="row"><span>Input</span><span id="input">-</span></div> -->
+      <!-- <div class="row"><span>Gear</span><span id="gear">D</span></div> -->
+      <!-- Terrain is now auto-enabled
+      <div class="controls">
+        <a href="#" id="toggleIonTerrain">Enable Mars terrain (ion)</a>
+        <span id="ionTerrainState" class="pill">off</span>
+      </div>
+      <div id="ionTerrainHint" class="hint">Requires a Cesium ion terrain asset id.</div>
+      -->
+      <div class="row"><span>Terrain Height</span><span id="terrainHeight">--</span></div>
+      <div class="row">
+        <span>Zoom</span>
+        <span id="zoomValue">5000x</span>
+      </div>
+      <input id="zoom" type="range" min="1000" max="50000" step="100" value="10000" />
+      <div class="row">
+        <span>Car Size</span>
+        <span id="sizeValue">2000x</span>
+      </div>
+      <input id="size" type="range" min="20" max="200" step="5" value="130" />
+      <div class="help">WASD / Arrows · Space = handbrake · R = reset</div>
     </div>
-    <div id="ionTerrainHint" class="hint">Requires a Cesium ion terrain asset id.</div>
-    -->
-    <div class="row"><span>Terrain Height</span><span id="terrainHeight">--</span></div>
-    <div class="row">
-      <span>Zoom</span>
-      <span id="zoomValue">5000x</span>
-    </div>
-    <input id="zoom" type="range" min="1000" max="50000" step="100" value="5000" />
-    <div class="row">
-      <span>Car Size</span>
-      <span id="sizeValue">2000x</span>
-    </div>
-    <input id="size" type="range" min="20" max="200" step="5" value="20" />
-    <div class="help">WASD / Arrows · Space = handbrake · R = reset</div>
   </div>
   <script type="importmap">
       {

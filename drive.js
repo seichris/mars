@@ -15,6 +15,8 @@ const zoomEl = document.getElementById("zoom");
 const zoomValueEl = document.getElementById("zoomValue");
 const sizeEl = document.getElementById("size");
 const sizeValueEl = document.getElementById("sizeValue");
+const hudEl = document.getElementById("hud");
+const hudToggleEl = document.getElementById("hudToggle");
 const ionTerrainToggleEl = document.getElementById("toggleIonTerrain");
 const ionTerrainStateEl = document.getElementById("ionTerrainState");
 const ionTerrainHintEl = document.getElementById("ionTerrainHint");
@@ -28,7 +30,10 @@ const debugImagery = params.get("debugImagery") === "1";
 const debugMesh = params.get("debugMesh") === "1";
 const debugSeams = params.get("debugSeams") === "1";
 const debugHeights = params.get("debugHeights") === "1";
-const forwardChunks = params.get("forwardChunks") === "1";
+const terrainWorkerEnabled = params.get("terrainWorker") !== "0";
+const forwardChunks = params.has("forwardChunks")
+  ? params.get("forwardChunks") === "1"
+  : true;
 const logTerrain = debug || debugPhysics || debugTerrain;
 const logImagery = debugImagery;
 const logMesh = debugMesh || debugPhysics;
@@ -36,14 +41,13 @@ const logSeams = debugSeams;
 const logHeights = debugHeights;
 const freezeTiles = params.get("freezeTiles") === "1";
 const noRenderHeights = params.get("noRenderHeights") === "1";
-const noChunkEvict = params.get("noChunkEvict") === "1";
+const noChunkEvict = true;
 const numberParam = (key, fallback) => {
   const raw = params.get(key);
   if (raw === null) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
 };
-
 const PHYSICS_SCALE = 1;
 const RENDER_SCALE = 100;
 const WORLD_TO_RENDER = RENDER_SCALE / PHYSICS_SCALE;
@@ -61,16 +65,23 @@ const CAR_ZIP_PATH = "./assets/cybertruck.zip";
 const PHYSICS_FIXED_TIMESTEP = 1 / 60;
 const PHYSICS_MAX_SUBSTEPS = 8;
 
-const PHYSICS_TERRAIN_CHUNK_SIZE = Math.max(120, numberParam("pchunk", 300)); // meters
-const PHYSICS_TERRAIN_SEGMENTS = Math.max(8, Math.min(64, Math.round(numberParam("pseg", 12))));
-const PHYSICS_TERRAIN_RADIUS = Math.max(0, Math.min(3, Math.round(numberParam("pradius", 2))));
+const PHYSICS_TERRAIN_CHUNK_SIZE = Math.max(120, numberParam("pchunk", 2400)); // meters
+const PHYSICS_TERRAIN_SEGMENTS = Math.max(2, Math.min(64, Math.round(numberParam("pseg", 2))));
+const PHYSICS_TERRAIN_RADIUS = Math.max(0, Math.min(3, Math.round(numberParam("pradius", 1))));
 const PHYSICS_CHUNK_FOV_DEG = Math.max(1, Math.min(180, numberParam("chunkFov", 150)));
 const PHYSICS_CHUNK_ALWAYS_RADIUS = Math.max(
   0,
   Math.min(PHYSICS_TERRAIN_RADIUS, Math.round(numberParam("chunkAlways", 1))),
 );
+const PHYSICS_BUILD_PER_FRAME = Math.max(0, Math.round(numberParam("pbuildPerFrame", 1)));
+const PHYSICS_BUILD_BUDGET_MS = Math.max(0, numberParam("pbuildMs", 1));
+const PHYSICS_PREFETCH_EXTRA_RADIUS = Math.max(0, Math.round(numberParam("pprefetch", 0)));
+const PHYSICS_PREFETCH_PER_FRAME = Math.max(0, Math.round(numberParam("pprefetchPerFrame", 1)));
+const PHYSICS_PREFETCH_BUDGET_MS = Math.max(0, numberParam("pprefetchMs", 1));
 const FLOATING_ORIGIN_THRESHOLD = Math.max(200, numberParam("origin", 1200)); // meters
 const SAFETY_PLANE_MS = Math.max(0, numberParam("safetyPlaneMs", 0));
+const PLANE_BLEND_MS = Math.max(0, numberParam("planeBlendMs", 250));
+const PLANE_BLEND_MAX_DELTA = Math.max(0, numberParam("planeBlendMaxDelta", 50));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SIMPLE VEHICLE PHYSICS CONFIGURATION
@@ -93,7 +104,7 @@ const VEHICLE_CONFIG = {
 
   // Drive configuration
   driveType: "AWD",           // "FWD", "RWD", or "AWD"
-  frontPowerBias: 0.4,        // For AWD: 40% front, 60% rear
+  frontPowerBias: 0.5,        // For AWD: 50% front, 50% rear
 
   // Braking
   brakeBias: 0.6,             // 60% front brake bias
@@ -104,7 +115,7 @@ const VEHICLE_CONFIG = {
 const COM_OFFSET_FACTOR = 0.1; // fraction of chassis height
 
 function setStatus(message) {
-  statusEl.textContent = message;
+  statusEl.textContent = message === "Ready" ? "" : message;
 }
 
 function terrainLog(message, data) {
@@ -272,7 +283,7 @@ function buildVehicle(world, size, groundMaterial, massScale = 1) {
   const chassisShape = new CANNON.Box(mainChassisExtents);
   const comOffset = height * COM_OFFSET_FACTOR;
   const chassisBody = new CANNON.Body({
-    mass: 1500 * massScale,
+    mass: 3000 * massScale,
     material: new CANNON.Material("chassis"),
   });
   chassisBody.addShape(chassisShape, new CANNON.Vec3(0, comOffset, 0));
@@ -425,10 +436,11 @@ async function main() {
     };
   }
 
-  const gridRadius = Number(params.get("grid") ?? 4);
+  const tilePersist = params.has("tilePersist") ? params.get("tilePersist") === "1" : true;
+  const gridRadius = Number(params.get("grid") ?? (tilePersist ? 6 : 4));
   const gridSize = gridRadius * 2 + 1;
   const tileRefreshMs = Math.max(0, numberParam("tileRefreshMs", 0));
-  const level10Only = params.get("level10Only") === "1";
+  const level10Only = params.has("level10Only") ? params.get("level10Only") === "1" : false;
   const tileStream = params.get("tileStream") === "1";
   const debugEvents = params.get("debugEvents") === "1";
   const eventVerbose = params.get("eventVerbose") === "1";
@@ -448,6 +460,11 @@ async function main() {
   const heightGridCache = new Map();
   const streamedTiles = new Map();
   let streamedLayer = null;
+  let terrainWorker = null;
+  let terrainWorkerReady = false;
+  let terrainWorkerFailed = false;
+  const terrainWorkerRequests = new Map();
+  let terrainWorkerReqId = 1;
 
   const captureEvents =
     debugEvents || debug || debugTerrain || debugPhysics || debugHeights || debugMesh || debugSeams || debugImagery;
@@ -746,9 +763,9 @@ async function main() {
   }
 
   // Heightmap resolution per tile (32x32 = 1089 vertices)
-  const TERRAIN_SEGMENTS = 32;
+  const TERRAIN_SEGMENTS = 8;
 
-  function createTileLayer(level, { isBase }) {
+  function createTileLayer(level, { isBase, persist }) {
     const xTiles = tilesX(level);
     const yTiles = tilesY(level);
     const lonWidth = 360 / xTiles;
@@ -759,55 +776,56 @@ async function main() {
 
     // Use segmented geometry for heightmap (32x32 segments = 33x33 vertices)
     const segments = isBase ? 1 : TERRAIN_SEGMENTS;
-    const tileGeometry = new THREE.PlaneGeometry(
-      tileWidthMeters * WORLD_TO_RENDER,
-      tileHeightMeters * WORLD_TO_RENDER,
-      segments,
-      segments,
-    );
-
     const meshes = [];
     const yOffset = levelYOffset(level);
     const layerOffset = TILE_LEVEL - level;
-    for (let row = 0; row < gridSize; row += 1) {
-      for (let col = 0; col < gridSize; col += 1) {
-        // Use StandardMaterial for 3D terrain lighting
-        const material = isBase
-          ? new THREE.MeshBasicMaterial({
-            color: 0x0b0b0b,
-            polygonOffset: true,
-            polygonOffsetFactor: -1 - layerOffset,
-            polygonOffsetUnits: -1 - layerOffset,
-            depthWrite: false,
-          })
-          : new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            flatShading: true,
-            polygonOffset: true,
-            polygonOffsetFactor: -1 - layerOffset,
-            polygonOffsetUnits: -1 - layerOffset,
-          });
-        const mesh = new THREE.Mesh(tileGeometry.clone(), material);
-        mesh.rotation.x = -Math.PI / 2;
-        mesh.receiveShadow = true;
-        mesh.position.y = yOffset;
-        mesh.renderOrder = 100 + level;
-        mesh.visible = isBase;
-        const offsetRow = row - gridRadius;
-        const offsetCol = col - gridRadius;
-        mesh.userData.bandDistMeters = Math.hypot(
-          offsetCol * tileWidthMeters,
-          offsetRow * tileHeightMeters,
-        );
-        mesh.userData.isBase = isBase;
-        mesh.userData.state = "idle";
-        mesh.userData.failedAt = 0;
-        mesh.userData.reqId = 0;
-        mesh.userData.heightsApplied = false;
-        mesh.userData.segments = segments;
-        mesh.userData.level = level;
-        tileGroup.add(mesh);
-        meshes.push(mesh);
+    if (!persist) {
+      const tileGeometry = new THREE.PlaneGeometry(
+        tileWidthMeters * WORLD_TO_RENDER,
+        tileHeightMeters * WORLD_TO_RENDER,
+        segments,
+        segments,
+      );
+      for (let row = 0; row < gridSize; row += 1) {
+        for (let col = 0; col < gridSize; col += 1) {
+          // Use StandardMaterial for 3D terrain lighting
+          const material = isBase
+            ? new THREE.MeshBasicMaterial({
+              color: 0x0b0b0b,
+              polygonOffset: true,
+              polygonOffsetFactor: -1 - layerOffset,
+              polygonOffsetUnits: -1 - layerOffset,
+              depthWrite: false,
+            })
+            : new THREE.MeshStandardMaterial({
+              color: 0xffffff,
+              flatShading: true,
+              polygonOffset: true,
+              polygonOffsetFactor: -1 - layerOffset,
+              polygonOffsetUnits: -1 - layerOffset,
+            });
+          const mesh = new THREE.Mesh(tileGeometry.clone(), material);
+          mesh.rotation.x = -Math.PI / 2;
+          mesh.receiveShadow = true;
+          mesh.position.y = yOffset;
+          mesh.renderOrder = 100 + level;
+          mesh.visible = isBase;
+          const offsetRow = row - gridRadius;
+          const offsetCol = col - gridRadius;
+          mesh.userData.bandDistMeters = Math.hypot(
+            offsetCol * tileWidthMeters,
+            offsetRow * tileHeightMeters,
+          );
+          mesh.userData.isBase = isBase;
+          mesh.userData.state = "idle";
+          mesh.userData.failedAt = 0;
+          mesh.userData.reqId = 0;
+          mesh.userData.heightsApplied = false;
+          mesh.userData.segments = segments;
+          mesh.userData.level = level;
+          tileGroup.add(mesh);
+          meshes.push(mesh);
+        }
       }
     }
 
@@ -825,7 +843,51 @@ async function main() {
       lastUpdateAt: 0,
       isBase,
       freezeLogged: false,
+      persistTiles: persist ? new Map() : null,
+      segments,
     };
+  }
+
+  function createPersistTileMesh(layer, tileX, tileY) {
+    const segments = layer.segments ?? (layer.isBase ? 1 : TERRAIN_SEGMENTS);
+    const geometry = new THREE.PlaneGeometry(
+      layer.tileWidthMeters * WORLD_TO_RENDER,
+      layer.tileHeightMeters * WORLD_TO_RENDER,
+      segments,
+      segments,
+    );
+    const layerOffset = TILE_LEVEL - layer.level;
+    const material = layer.isBase
+      ? new THREE.MeshBasicMaterial({
+        color: 0x0b0b0b,
+        polygonOffset: true,
+        polygonOffsetFactor: -1 - layerOffset,
+        polygonOffsetUnits: -1 - layerOffset,
+        depthWrite: false,
+      })
+      : new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        flatShading: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -1 - layerOffset,
+        polygonOffsetUnits: -1 - layerOffset,
+      });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.receiveShadow = true;
+    mesh.position.y = levelYOffset(layer.level);
+    mesh.renderOrder = 100 + layer.level;
+    mesh.visible = layer.isBase;
+    mesh.userData.isBase = layer.isBase;
+    mesh.userData.state = "idle";
+    mesh.userData.failedAt = 0;
+    mesh.userData.reqId = 0;
+    mesh.userData.heightsApplied = false;
+    mesh.userData.segments = segments;
+    mesh.userData.level = layer.level;
+    mesh.userData.tileX = tileX;
+    mesh.userData.tileY = tileY;
+    return mesh;
   }
 
   // Load/render coarse tiles first so something shows up quickly, then refine.
@@ -844,7 +906,12 @@ async function main() {
   } else {
     const hasBaseLayer = minLodLevel !== TILE_LEVEL;
     for (let level = minLodLevel; level <= TILE_LEVEL; level += 1) {
-      tileLayers.push(createTileLayer(level, { isBase: hasBaseLayer && level === minLodLevel }));
+      tileLayers.push(
+        createTileLayer(level, {
+          isBase: hasBaseLayer && level === minLodLevel,
+          persist: tilePersist,
+        }),
+      );
     }
   }
 
@@ -1219,8 +1286,8 @@ async function main() {
 
   let physicsDebugger = null;
   let physicsDebugGroup = null;
-  let debugTerrainMesh = null;
-  let debugTerrainKey = null;
+  let debugTerrainGroup = null;
+  let debugTerrainMeshes = new Map();
 
   function clearPhysicsDebug() {
     if (!physicsDebugGroup) return;
@@ -1239,29 +1306,25 @@ async function main() {
     physicsDebugger = null;
   }
 
-  function clearDebugTerrainMesh() {
-    if (!debugTerrainMesh) return;
-    meshLog("debug terrain mesh clear", { key: debugTerrainKey });
-    if (captureEvents) pushTerrainEvent("debug-terrain-mesh-clear", { key: debugTerrainKey });
-    debugTerrainMesh.geometry.dispose();
-    if (Array.isArray(debugTerrainMesh.material)) {
-      debugTerrainMesh.material.forEach((mat) => mat.dispose());
-    } else {
-      debugTerrainMesh.material.dispose();
+  function clearDebugTerrainMeshes() {
+    if (!debugTerrainGroup) return;
+    for (const [key, mesh] of debugTerrainMeshes.entries()) {
+      meshLog("debug terrain mesh clear", { key });
+      if (captureEvents) pushTerrainEvent("debug-terrain-mesh-clear", { key });
+      mesh.geometry.dispose();
+      if (Array.isArray(mesh.material)) {
+        mesh.material.forEach((mat) => mat.dispose());
+      } else {
+        mesh.material.dispose();
+      }
+      debugTerrainGroup.remove(mesh);
     }
-    scene.remove(debugTerrainMesh);
-    debugTerrainMesh = null;
-    debugTerrainKey = null;
+    debugTerrainMeshes.clear();
+    scene.remove(debugTerrainGroup);
+    debugTerrainGroup = null;
   }
 
-  function updateDebugTerrainMesh(chunk) {
-    if (!debugPhysics || !chunk?.heights) return;
-    const key = `${chunk.cx}:${chunk.cz}`;
-    if (debugTerrainKey === key && debugTerrainMesh) return;
-    meshLog("debug terrain mesh rebuild", { key });
-    if (captureEvents) pushTerrainEvent("debug-terrain-mesh-rebuild", { key });
-    clearDebugTerrainMesh();
-
+  function buildDebugTerrainMesh(chunk) {
     const segments = chunk.segments;
     const rows = segments + 1;
     const cols = segments + 1;
@@ -1293,22 +1356,67 @@ async function main() {
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.x = (chunk.originX + sizeMeters * 0.5) * WORLD_TO_RENDER;
     mesh.position.z = (chunk.originZ + sizeMeters * 0.5) * WORLD_TO_RENDER;
-    scene.add(mesh);
-    debugTerrainMesh = mesh;
-    debugTerrainKey = key;
-    meshLog("debug terrain mesh ready", {
-      key,
-      originX: chunk.originX,
-      originZ: chunk.originZ,
-      segments,
-    });
-    if (captureEvents) {
-      pushTerrainEvent("debug-terrain-mesh-ready", {
+    mesh.userData.segments = segments;
+    return mesh;
+  }
+
+  function syncDebugTerrainMeshes(terrain) {
+    if (!debugPhysics || !terrain?.chunks) return;
+    if (!debugTerrainGroup) {
+      debugTerrainGroup = new THREE.Group();
+      scene.add(debugTerrainGroup);
+    }
+    const readyKeys = new Set();
+    for (const [key, chunk] of terrain.chunks.entries()) {
+      if (!chunk || chunk.state !== "ready" || !chunk.heights) continue;
+      readyKeys.add(key);
+      const existing = debugTerrainMeshes.get(key);
+      if (existing && existing.userData.segments === chunk.segments) continue;
+      if (existing) {
+        existing.geometry.dispose();
+        if (Array.isArray(existing.material)) {
+          existing.material.forEach((mat) => mat.dispose());
+        } else {
+          existing.material.dispose();
+        }
+        debugTerrainGroup.remove(existing);
+        debugTerrainMeshes.delete(key);
+      }
+      meshLog("debug terrain mesh rebuild", { key });
+      if (captureEvents) pushTerrainEvent("debug-terrain-mesh-rebuild", { key });
+      const mesh = buildDebugTerrainMesh(chunk);
+      debugTerrainGroup.add(mesh);
+      debugTerrainMeshes.set(key, mesh);
+      meshLog("debug terrain mesh ready", {
         key,
         originX: chunk.originX,
         originZ: chunk.originZ,
-        segments,
+        segments: chunk.segments,
       });
+      if (captureEvents) {
+        pushTerrainEvent("debug-terrain-mesh-ready", {
+          key,
+          originX: chunk.originX,
+          originZ: chunk.originZ,
+          segments: chunk.segments,
+        });
+      }
+    }
+    for (const key of debugTerrainMeshes.keys()) {
+      if (!readyKeys.has(key)) {
+        const mesh = debugTerrainMeshes.get(key);
+        if (!mesh) continue;
+        meshLog("debug terrain mesh clear", { key });
+        if (captureEvents) pushTerrainEvent("debug-terrain-mesh-clear", { key });
+        mesh.geometry.dispose();
+        if (Array.isArray(mesh.material)) {
+          mesh.material.forEach((mat) => mat.dispose());
+        } else {
+          mesh.material.dispose();
+        }
+        debugTerrainGroup.remove(mesh);
+        debugTerrainMeshes.delete(key);
+      }
     }
   }
 
@@ -1524,9 +1632,9 @@ async function main() {
         }
       }
     }
-    if (debugTerrainMesh) {
-      debugTerrainMesh.position.x -= renderShiftX;
-      debugTerrainMesh.position.z -= renderShiftZ;
+    if (debugTerrainGroup) {
+      debugTerrainGroup.position.x -= renderShiftX;
+      debugTerrainGroup.position.z -= renderShiftZ;
     }
     if (captureEvents) {
       pushTerrainEvent("origin-shift", {
@@ -1561,6 +1669,14 @@ async function main() {
     applyCarScale();
   });
 
+  if (hudEl && hudToggleEl) {
+    hudToggleEl.addEventListener("click", () => {
+      const isCollapsed = hudEl.classList.toggle("collapsed");
+      hudToggleEl.textContent = isCollapsed ? "+" : "-";
+      hudToggleEl.setAttribute("aria-label", isCollapsed ? "Expand HUD" : "Minimize HUD");
+    });
+  }
+
   // COG terrain sampling using geotiff.js
   let cogTiff = null;
   let cogImage = null;
@@ -1579,6 +1695,46 @@ async function main() {
   const COG_WIDTH = 53347;
   const COG_HEIGHT = 32601;
 
+  function initTerrainWorker() {
+    if (!terrainWorkerEnabled || terrainWorker || terrainWorkerFailed) return;
+    try {
+      terrainWorker = new Worker(new URL("./terrain-worker.js", import.meta.url), { type: "module" });
+    } catch (err) {
+      terrainWorkerFailed = true;
+      console.warn("[drive] terrain worker init failed:", err);
+      return;
+    }
+    terrainWorker.onmessage = (event) => {
+      const { type } = event.data ?? {};
+      if (type === "ready") {
+        terrainWorkerReady = true;
+        return;
+      }
+      if (type === "sampleGridResult") {
+        const { id, heights } = event.data;
+        const entry = terrainWorkerRequests.get(id);
+        if (!entry) return;
+        terrainWorkerRequests.delete(id);
+        const data = heights ? new Float32Array(heights) : null;
+        entry.resolve(data);
+        return;
+      }
+      if (type === "sampleGridError") {
+        const { id, message } = event.data;
+        const entry = terrainWorkerRequests.get(id);
+        if (!entry) return;
+        terrainWorkerRequests.delete(id);
+        console.warn("[drive] terrain worker sample error:", message);
+        entry.resolve(null);
+      }
+    };
+    terrainWorker.onerror = (err) => {
+      terrainWorkerFailed = true;
+      console.warn("[drive] terrain worker error:", err);
+    };
+    terrainWorker.postMessage({ type: "init", url: "/terrain/cog" });
+  }
+
   async function loadCogTerrain() {
     if (cogTiff) return true;
     try {
@@ -1586,6 +1742,7 @@ async function main() {
       cogTiff = await GeoTIFF.fromUrl("/terrain/cog", { allowFullFile: false });
       cogImage = await cogTiff.getImage();
       if (ionTerrainHintEl) ionTerrainHintEl.textContent = "COG terrain loaded. Height will update as you drive.";
+      initTerrainWorker();
       // eslint-disable-next-line no-console
       console.log("[drive] COG terrain loaded:", {
         width: cogImage.getWidth(),
@@ -1675,7 +1832,7 @@ async function main() {
    * Sample a grid of heights from COG for terrain mesh vertices
    * Returns a Float32Array of heights in row-major order
    */
-	  async function sampleHeightGrid(bounds, segments) {
+	  async function sampleHeightGridLocal(bounds, segments) {
 	    if (!cogImage) return null;
 
 	    const { south, north, west, east } = bounds;
@@ -1740,6 +1897,24 @@ async function main() {
       console.warn("[drive] Height grid sample error:", err.message);
       return null;
     }
+  }
+
+  function sampleHeightGridWorker(bounds, segments) {
+    if (!terrainWorker || terrainWorkerFailed) return null;
+    const id = terrainWorkerReqId++;
+    return new Promise((resolve) => {
+      terrainWorkerRequests.set(id, { resolve });
+      terrainWorker.postMessage({ type: "sampleGrid", id, bounds, segments });
+    });
+  }
+
+  async function sampleHeightGrid(bounds, segments) {
+    if (!cogImage) return null;
+    if (terrainWorkerEnabled && terrainWorker && !terrainWorkerFailed) {
+      const heights = await sampleHeightGridWorker(bounds, segments);
+      if (heights) return heights;
+    }
+    return sampleHeightGridLocal(bounds, segments);
   }
 
   function sampleHeightFromGrid(bounds, heights, segments, lat, lon) {
@@ -1881,6 +2056,18 @@ async function main() {
       this.lastHeightLogKey = null;
       this.lastSeamLogAt = new Map();
       this.bodyKeyById = new Map();
+      this.buildPerFrame = PHYSICS_BUILD_PER_FRAME;
+      this.buildBudgetMs = PHYSICS_BUILD_BUDGET_MS;
+      this.urgentQueue = [];
+      this.urgentCursor = 0;
+      this.urgentSet = new Set();
+      this.prefetchExtraRadius = PHYSICS_PREFETCH_EXTRA_RADIUS;
+      this.prefetchPerFrame = PHYSICS_PREFETCH_PER_FRAME;
+      this.prefetchBudgetMs = PHYSICS_PREFETCH_BUDGET_MS;
+      this.prefetchQueue = [];
+      this.prefetchCursor = 0;
+      this.prefetchSet = new Set();
+      this.prefetchCenterKey = null;
     }
 
     setEnabled(enabled) {
@@ -1940,12 +2127,15 @@ async function main() {
           if (logKey !== this.lastHeightLogKey || now - this.lastHeightLogAt > 1000) {
             this.lastHeightLogKey = logKey;
             this.lastHeightLogAt = now;
+            const ageMs = chunk?.requestedAt ? now - chunk.requestedAt : null;
             console.warn("[drive] terrain height miss", {
               reason,
               key,
               lat,
               lon,
               chunks: this.chunks.size,
+              state: chunk?.state ?? null,
+              ageMs: ageMs !== null ? ageMs.toFixed(1) : null,
             });
             if (captureEvents) {
               pushTerrainEvent("terrain-height-miss", {
@@ -1954,6 +2144,8 @@ async function main() {
                 lat,
                 lon,
                 chunks: this.chunks.size,
+                state: chunk?.state ?? null,
+                ageMs,
               });
             }
           }
@@ -2058,6 +2250,121 @@ async function main() {
       this.lastCenterKey = null;
     }
 
+    refreshUrgentQueue(centerKey, entries) {
+      if (!entries.length) {
+        this.urgentQueue = [];
+        this.urgentCursor = 0;
+        this.urgentSet.clear();
+        return;
+      }
+      entries.sort((a, b) => a.dist2 - b.dist2);
+      this.urgentQueue = entries;
+      this.urgentCursor = 0;
+      this.urgentSet = new Set(entries.map((entry) => entry.key));
+      if (logTerrain) {
+        console.log("[drive] physics build queue", {
+          key: centerKey,
+          radius: this.radius,
+          queued: entries.length,
+        });
+      }
+    }
+
+    processUrgentQueue() {
+      if (this.buildPerFrame <= 0) return this.urgentCursor < this.urgentQueue.length;
+      if (this.urgentCursor >= this.urgentQueue.length) return false;
+      const startAt = performance.now();
+      let created = 0;
+      while (this.urgentCursor < this.urgentQueue.length && created < this.buildPerFrame) {
+        if (this.buildBudgetMs > 0 && performance.now() - startAt > this.buildBudgetMs) break;
+        const entry = this.urgentQueue[this.urgentCursor];
+        this.urgentCursor += 1;
+        if (!entry) continue;
+        this.urgentSet.delete(entry.key);
+        if (this.chunks.has(entry.key)) continue;
+        this.createChunk(entry.cx, entry.cz, entry.key);
+        created += 1;
+      }
+      if (this.urgentCursor >= this.urgentQueue.length) {
+        this.urgentQueue = [];
+        this.urgentCursor = 0;
+        this.urgentSet.clear();
+      }
+      return this.urgentCursor < this.urgentQueue.length;
+    }
+
+    getPrefetchRadius() {
+      if (this.prefetchExtraRadius <= 0) return this.radius;
+      return this.radius + this.prefetchExtraRadius;
+    }
+
+    refreshPrefetchQueue(cx, cz) {
+      if (this.prefetchExtraRadius <= 0 || this.prefetchPerFrame <= 0) return;
+      const prefetchRadius = this.getPrefetchRadius();
+      if (prefetchRadius <= this.radius) return;
+      const centerKey = `${cx}:${cz}`;
+      if (centerKey === this.prefetchCenterKey) return;
+      this.prefetchCenterKey = centerKey;
+
+      const entries = [];
+      for (let dz = -prefetchRadius; dz <= prefetchRadius; dz += 1) {
+        for (let dx = -prefetchRadius; dx <= prefetchRadius; dx += 1) {
+          const nx = cx + dx;
+          const nz = cz + dz;
+          const key = `${nx}:${nz}`;
+          if (this.chunks.has(key)) continue;
+          if (this.urgentSet.has(key)) continue;
+          entries.push({ key, cx: nx, cz: nz, dist2: dx * dx + dz * dz });
+        }
+      }
+      entries.sort((a, b) => a.dist2 - b.dist2);
+      this.prefetchQueue = entries;
+      this.prefetchCursor = 0;
+      this.prefetchSet = new Set(entries.map((entry) => entry.key));
+      if (logTerrain && entries.length) {
+        console.log("[drive] physics prefetch queue", {
+          key: centerKey,
+          radius: prefetchRadius,
+          extraRadius: this.prefetchExtraRadius,
+          queued: entries.length,
+        });
+      }
+    }
+
+    processPrefetchQueue() {
+      if (this.prefetchExtraRadius <= 0 || this.prefetchPerFrame <= 0) return;
+      if (this.prefetchCursor >= this.prefetchQueue.length) return;
+      const startAt = performance.now();
+      let created = 0;
+      while (this.prefetchCursor < this.prefetchQueue.length && created < this.prefetchPerFrame) {
+        if (this.prefetchBudgetMs > 0 && performance.now() - startAt > this.prefetchBudgetMs) break;
+        const entry = this.prefetchQueue[this.prefetchCursor];
+        this.prefetchCursor += 1;
+        if (!entry) continue;
+        this.prefetchSet.delete(entry.key);
+        if (this.chunks.has(entry.key)) continue;
+        this.createChunk(entry.cx, entry.cz, entry.key);
+        created += 1;
+      }
+      if (this.prefetchCursor >= this.prefetchQueue.length) {
+        if (logTerrain && this.prefetchQueue.length) {
+          console.log("[drive] physics prefetch complete", {
+            key: this.prefetchCenterKey,
+            queued: this.prefetchQueue.length,
+          });
+        }
+        this.prefetchQueue = [];
+        this.prefetchCursor = 0;
+        this.prefetchSet.clear();
+      }
+    }
+
+    processBuildQueues() {
+      const urgentPending = this.processUrgentQueue();
+      if (urgentPending) return;
+      this.processPrefetchQueue();
+    }
+
     logSeamMismatch(key) {
       if (!logSeams) return;
       const chunk = this.chunks.get(key);
@@ -2125,6 +2432,7 @@ async function main() {
       const cz = Number(centerZStr);
 
       const needed = new Set();
+      const urgentEntries = [];
       const carWorld = dir ? latLonToWorldMeters(carLat, carLon) : null;
       const cosHalfFov = dir ? Math.cos(((PHYSICS_CHUNK_FOV_DEG / 2) * Math.PI) / 180) : null;
       for (let dz = -this.radius; dz <= this.radius; dz += 1) {
@@ -2148,7 +2456,7 @@ async function main() {
           const key = `${nx}:${nz}`;
           needed.add(key);
           if (!this.chunks.has(key)) {
-            this.createChunk(nx, nz, key);
+            urgentEntries.push({ key, cx: nx, cz: nz, dist2: dx * dx + dz * dz });
           }
         }
       }
@@ -2171,6 +2479,9 @@ async function main() {
           }
         }
       }
+
+      this.refreshUrgentQueue(centerKey, urgentEntries);
+      this.refreshPrefetchQueue(cx, cz);
     }
 
     createChunk(cx, cz, key) {
@@ -2180,6 +2491,8 @@ async function main() {
         body: null,
         state: "loading",
         reqId: (Date.now() + Math.random()),
+        requestedAt: performance.now(),
+        loadMs: null,
         originSnapshot: { x: worldOrigin.x, z: worldOrigin.z },
         originX: 0,
         originZ: 0,
@@ -2266,6 +2579,7 @@ async function main() {
           active.minHeight = minH;
           active.maxHeight = maxH;
           active.state = "ready";
+          active.loadMs = performance.now() - active.requestedAt;
           if (captureEvents) {
             pushTerrainEvent("physics-chunk-ready", {
               key,
@@ -2276,6 +2590,7 @@ async function main() {
               originZ: localZ0Now,
               minHeight: minH,
               maxHeight: maxH,
+              loadMs: active.loadMs,
             });
           }
           const os = active.originSnapshot;
@@ -2299,6 +2614,7 @@ async function main() {
               bounds,
               minHeight: minH.toFixed(2),
               maxHeight: maxH.toFixed(2),
+              loadMs: active.loadMs?.toFixed?.(1) ?? null,
             });
           }
           this.logSeamMismatch(key);
@@ -2508,14 +2824,16 @@ function disableCogTerrain() {
         break;
       case "KeyR":
         if (isDown && chassisBody) {
-          const resetLat = CENTER_LAT;
-          const resetLon = CENTER_LON;
+          const { lat: resetLat, lon: resetLon } = chassisToLatLon(chassisBody, travelScale);
           const resetPos = latLonToChassis(resetLat, resetLon, travelScale);
           const resetHeight = physicsTerrain?.getHeightAt?.(resetLat, resetLon)
-            ?? (terrainHeightValid ? cachedTerrainHeight : 0);
+            ?? (terrainHeightValid ? cachedTerrainHeight : null);
+          const resetY = Number.isFinite(resetHeight)
+            ? resetHeight / travelScale + initialY
+            : chassisBody.position.y;
           chassisBody.position.set(
             resetPos.x,
-            resetHeight / travelScale + initialY,
+            resetY,
             resetPos.z,
           );
           chassisBody.velocity.setZero();
@@ -2554,6 +2872,9 @@ function disableCogTerrain() {
 
   const cameraOffset = new THREE.Vector3(0, 4.5, -10);
   const lookOffset = new THREE.Vector3(0, 1.2, 0);
+  const yawEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  const yawQuat = new THREE.Quaternion();
+  const yawAxis = new THREE.Vector3(0, 1, 0);
 
   const clock = new THREE.Clock();
   let steer = 0;
@@ -2599,7 +2920,11 @@ function disableCogTerrain() {
     // ─────────────────────────────────────────────────────────────────────────
     // ENGINE & BRAKING: Realistic power delivery with drive type configuration
     // ─────────────────────────────────────────────────────────────────────────
-    const baseEngineForce = 4500 * Math.pow(physicsScaleFactor, 0.7);
+    const carScaleBoost = Math.min(5, Math.max(1, carScaleFactor / 20));
+    const baseEngineForce = 4500
+      * Math.pow(physicsScaleFactor, 0.7)
+      * Math.pow(carScaleBoost, 0.7)
+      * 0.5;
 
     // Engine force curves based on speed (power drops at high speed)
     const maxSpeedEst = 40; // estimated top speed in physics units
@@ -2829,15 +3154,11 @@ function disableCogTerrain() {
 
     if (physicsTerrain) {
       physicsTerrain.update(carLat, carLon, forwardChunks ? getMotionDirMeters() : null);
+      physicsTerrain.processBuildQueues();
     }
 
     if (debugPhysics && physicsTerrain) {
-      const chunk = physicsTerrain.getChunk(carLat, carLon);
-      if (chunk?.state === "ready") {
-        updateDebugTerrainMesh(chunk);
-      } else {
-        clearDebugTerrainMesh();
-      }
+      syncDebugTerrainMeshes(physicsTerrain);
     }
 
     if (spawnPending && physicsTerrain?.isReadyFor?.(CENTER_LAT, CENTER_LON)) {
@@ -3155,6 +3476,16 @@ function disableCogTerrain() {
     const shouldUsePlane =
       !cogTerrainEnabled || !physicsTerrainReady || missingTerrainHeight || noGroundTooLong;
 
+    const fallbackHeight = Number.isFinite(terrainHeight)
+      ? terrainHeight
+      : Number.isFinite(cachedTerrainHeight)
+        ? cachedTerrainHeight
+        : null;
+    const fallbackY =
+      Number.isFinite(fallbackHeight) && fallbackHeight !== 0
+        ? fallbackHeight / travelScale
+        : 0;
+
     const groundInWorldBefore = world.bodies.includes(groundBody);
     if (captureEvents) {
       const key = `${shouldUsePlane}:${groundInWorldBefore}:${missingTerrainHeight}:${noGroundTooLong}:${physicsTerrainReady}`;
@@ -3174,13 +3505,12 @@ function disableCogTerrain() {
       }
     }
     if (shouldUsePlane) {
+      if (animate.planeBlend) animate.planeBlend = null;
       if (!world.bodies.includes(groundBody)) {
         world.addBody(groundBody);
         terrainLog("ground plane add", { reason: "shouldUsePlane" });
         if (captureEvents) pushTerrainEvent("ground-plane-add", { reason: "shouldUsePlane" });
       }
-      const fallbackHeight = terrainHeight ?? cachedTerrainHeight;
-      const fallbackY = fallbackHeight !== 0 ? fallbackHeight / travelScale : 0;
       const prevPlaneHeight = groundBody.position.y * travelScale;
       groundBody.position.y = fallbackY;
       groundBody.quaternion.copy(baseGroundQuat);
@@ -3206,10 +3536,71 @@ function disableCogTerrain() {
           noGroundTooLong,
         });
       }
-    } else if (world.bodies.includes(groundBody)) {
-      world.removeBody(groundBody);
-      terrainLog("ground plane remove", { reason: "terrain-ready" });
-      if (captureEvents) pushTerrainEvent("ground-plane-remove", { reason: "terrain-ready" });
+    } else {
+      const groundInWorld = world.bodies.includes(groundBody);
+      const carHeightMeters = chassisBody ? chassisBody.position.y * travelScale : null;
+      const planeHeightMeters = groundBody.position.y * travelScale;
+      const heightDelta = Number.isFinite(fallbackHeight)
+        ? Math.abs(fallbackHeight - planeHeightMeters)
+        : null;
+      const planeBelowCar =
+        Number.isFinite(carHeightMeters) && planeHeightMeters <= carHeightMeters + 0.5;
+      const canBlend =
+        groundInWorld
+        && PLANE_BLEND_MS > 0
+        && Number.isFinite(fallbackHeight)
+        && planeBelowCar
+        && Number.isFinite(heightDelta)
+        && heightDelta <= PLANE_BLEND_MAX_DELTA;
+
+      if (canBlend) {
+        if (!animate.planeBlend) {
+          animate.planeBlend = {
+            startAt: now,
+            endAt: now + PLANE_BLEND_MS,
+            startHeight: planeHeightMeters,
+            targetHeight: fallbackHeight,
+          };
+          terrainLog("ground plane blend start", {
+            startHeight: animate.planeBlend.startHeight,
+            targetHeight: animate.planeBlend.targetHeight,
+          });
+          if (captureEvents) {
+            pushTerrainEvent("ground-plane-blend-start", {
+              startHeight: animate.planeBlend.startHeight,
+              targetHeight: animate.planeBlend.targetHeight,
+            });
+          }
+        }
+      } else {
+        animate.planeBlend = null;
+      }
+
+      if (animate.planeBlend) {
+        const blend = animate.planeBlend;
+        const duration = Math.max(1, blend.endAt - blend.startAt);
+        const t = clamp((now - blend.startAt) / duration, 0, 1);
+        const blendedHeight = blend.startHeight + (blend.targetHeight - blend.startHeight) * t;
+        if (!world.bodies.includes(groundBody)) {
+          world.addBody(groundBody);
+          terrainLog("ground plane add", { reason: "blend" });
+          if (captureEvents) pushTerrainEvent("ground-plane-add", { reason: "blend" });
+        }
+        groundBody.position.y = blendedHeight / travelScale;
+        groundBody.quaternion.copy(baseGroundQuat);
+        if (t >= 1) {
+          world.removeBody(groundBody);
+          terrainLog("ground plane remove", { reason: "blend-complete" });
+          if (captureEvents) {
+            pushTerrainEvent("ground-plane-remove", { reason: "blend-complete" });
+          }
+          animate.planeBlend = null;
+        }
+      } else if (world.bodies.includes(groundBody)) {
+        world.removeBody(groundBody);
+        terrainLog("ground plane remove", { reason: "terrain-ready" });
+        if (captureEvents) pushTerrainEvent("ground-plane-remove", { reason: "terrain-ready" });
+      }
     }
     if (logTerrain && chassisBody) {
       const groundInWorld = world.bodies.includes(groundBody);
@@ -3247,11 +3638,11 @@ function disableCogTerrain() {
     if (tileStream) {
       updateStreamTiles(carLat, carLon);
     } else {
-    for (const layer of tileLayers) {
-      const now = performance.now();
-      const level = layer.level;
-      const center = tileXYFromLatLon(level, carLat, carLon);
-      const centerKey = `${center.x}:${center.y}`;
+      for (const layer of tileLayers) {
+        const now = performance.now();
+        const level = layer.level;
+        const center = tileXYFromLatLon(level, carLat, carLon);
+        const centerKey = `${center.x}:${center.y}`;
         if (freezeTiles && layer.lastCenterKey !== null) {
           if (!layer.freezeLogged) {
             imageryLog("imagery refresh frozen", { level });
@@ -3269,6 +3660,80 @@ function disableCogTerrain() {
         layer.lastUpdateAt = now;
 
         const layerRadius = layer.isBase ? gridRadius : clamp(gridRadius - (TILE_LEVEL - level), 1, gridRadius);
+
+        if (layer.persistTiles) {
+          let requested = 0;
+          let created = 0;
+          let newUrl = 0;
+          for (let row = -layerRadius; row <= layerRadius; row += 1) {
+            for (let col = -layerRadius; col <= layerRadius; col += 1) {
+              let tileX = center.x + col;
+              let tileY = center.y + row;
+
+              tileX = ((tileX % layer.xTiles) + layer.xTiles) % layer.xTiles;
+              tileY = clamp(tileY, 0, layer.yTiles - 1);
+
+              const bounds = tileBounds(level, tileX, tileY);
+              const tileCenterLat = (bounds.north + bounds.south) / 2;
+              const tileCenterLon = (bounds.west + bounds.east) / 2;
+              const meters = latLonToLocalMeters(tileCenterLat, tileCenterLon);
+
+              const tileKey = `${tileX}:${tileY}`;
+              let mesh = layer.persistTiles.get(tileKey);
+              if (!mesh) {
+                mesh = createPersistTileMesh(layer, tileX, tileY);
+                tileGroup.add(mesh);
+                layer.meshes.push(mesh);
+                layer.persistTiles.set(tileKey, mesh);
+                created += 1;
+              }
+
+              mesh.position.x = meters.x * WORLD_TO_RENDER;
+              mesh.position.z = meters.z * WORLD_TO_RENDER;
+              mesh.userData.tileX = tileX;
+              mesh.userData.tileY = tileY;
+
+              const url = `${PROXY_BASE_PATH}/${level}/${tileX}/${tileY}.jpg`;
+              if (mesh.material.map) {
+                mesh.visible = true;
+              } else {
+                mesh.visible = layer.isBase || level10Only;
+              }
+              if (mesh.userData.url !== url) newUrl += 1;
+              requestTileTexture(mesh, url, bounds);
+              requested += 1;
+            }
+          }
+
+          if (logTerrain) {
+            console.log("[drive] tile refresh", {
+              level,
+              centerKey,
+              reason: centerChanged ? "center-change" : "timer",
+              refreshMs: tileRefreshMs,
+              gridRadius,
+              layerRadius,
+              requested,
+              newUrl,
+              created,
+              tiles: layer.persistTiles.size,
+            });
+            if (captureEvents && (eventVerbose || centerChanged)) {
+              pushTerrainEvent("tile-refresh", {
+                level,
+                centerKey,
+                reason: centerChanged ? "center-change" : "timer",
+                gridRadius,
+                layerRadius,
+                requested,
+                newUrl,
+                created,
+                tiles: layer.persistTiles.size,
+              });
+            }
+          }
+          continue;
+        }
 
         let meshIndex = 0;
         let requested = 0;
@@ -3288,30 +3753,30 @@ function disableCogTerrain() {
             const tileCenterLon = (bounds.west + bounds.east) / 2;
             const meters = latLonToLocalMeters(tileCenterLat, tileCenterLon);
 
-          const mesh = layer.meshes[meshIndex];
-          mesh.position.x = meters.x * WORLD_TO_RENDER;
-          mesh.position.z = meters.z * WORLD_TO_RENDER;
-          mesh.userData.tileX = tileX;
-          mesh.userData.tileY = tileY;
+            const mesh = layer.meshes[meshIndex];
+            mesh.position.x = meters.x * WORLD_TO_RENDER;
+            mesh.position.z = meters.z * WORLD_TO_RENDER;
+            mesh.userData.tileX = tileX;
+            mesh.userData.tileY = tileY;
 
-          const inBand = Math.abs(row) <= layerRadius && Math.abs(col) <= layerRadius;
-          if (!inBand) {
-            mesh.visible = false;
-            hidden += 1;
-            meshIndex += 1;
-            continue;
-          }
-          inBandCount += 1;
+            const inBand = Math.abs(row) <= layerRadius && Math.abs(col) <= layerRadius;
+            if (!inBand) {
+              mesh.visible = false;
+              hidden += 1;
+              meshIndex += 1;
+              continue;
+            }
+            inBandCount += 1;
 
-          const url = `${PROXY_BASE_PATH}/${level}/${tileX}/${tileY}.jpg`;
-          if (mesh.material.map) {
-            mesh.visible = true;
-          } else {
-            mesh.visible = layer.isBase || level10Only;
-          }
-          if (mesh.userData.url !== url) newUrl += 1;
-          requestTileTexture(mesh, url, bounds);
-          requested += 1;
+            const url = `${PROXY_BASE_PATH}/${level}/${tileX}/${tileY}.jpg`;
+            if (mesh.material.map) {
+              mesh.visible = true;
+            } else {
+              mesh.visible = layer.isBase || level10Only;
+            }
+            if (mesh.userData.url !== url) newUrl += 1;
+            requestTileTexture(mesh, url, bounds);
+            requested += 1;
 
             meshIndex += 1;
           }
@@ -3350,12 +3815,15 @@ function disableCogTerrain() {
     const dynamicCameraOffset = cameraOffset.clone();
     dynamicCameraOffset.x += steerCameraOffset; // Shift camera left/right
 
+    // Use yaw-only rotation to avoid camera jitter from suspension pitch/roll.
+    yawEuler.setFromQuaternion(carRoot.quaternion, "YXZ");
+    yawQuat.setFromAxisAngle(yawAxis, yawEuler.y);
     const idealOffset = dynamicCameraOffset
       .clone()
       .multiplyScalar(zoomFactor)
-      .applyQuaternion(carRoot.quaternion)
+      .applyQuaternion(yawQuat)
       .add(carRoot.position);
-    camera.position.lerp(idealOffset, 0.08); // Slightly slower lerp for smoother camera
+    camera.position.lerp(idealOffset, 0.05); // More smoothing (less jitter), slightly more lag
 
     // Look slightly ahead of the car based on steering
     const lookTarget = carRoot.position.clone().add(lookOffset);
@@ -3363,7 +3831,9 @@ function disableCogTerrain() {
 
 
     speedEl.textContent = `${speed.toFixed(1)} m/s`;
-    gearEl.textContent = controls.backward ? "R" : "D";
+    if (gearEl) {
+      gearEl.textContent = controls.backward ? "R" : "D";
+    }
     coordsEl.textContent = `${carLat.toFixed(3)}, ${carLon.toFixed(3)}`;
     if (inputEl) {
       const activeInputs = [];

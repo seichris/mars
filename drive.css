@@ -34,6 +34,42 @@ canvas {
   min-width: 220px;
 }
 
+#hud .hud-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#hud .hud-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#hud.collapsed {
+  min-width: 0;
+  width: 36px;
+  height: 36px;
+  padding: 6px;
+}
+
+#hud.collapsed .hud-content {
+  display: none;
+}
+
+#hud.collapsed .hud-toggle {
+  position: static;
+  width: 24px;
+  height: 24px;
+}
+
 #app {
   position: relative;
 }
