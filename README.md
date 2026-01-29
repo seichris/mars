@@ -112,6 +112,10 @@ Cybertruck model: https://sketchfab.com/3d-models/teslas-cyber-truck-low-poly-d5
 
 ## Roadmap
 
+- Preload terrain chunks?
 - More fun car physics
+- Car animations
+- Higher res map by hosting tiles
+- Jump to other coordinates
 - [Terraform Mars and sail a boat on its lakes](https://caseyhandmer.wordpress.com/2022/07/12/how-to-terraform-mars-for-10b-in-10-years/)
 - Actually using CJHandmer's terrain data, additionally to the imagery tiles

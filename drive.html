@@ -46,6 +46,25 @@
       <div class="help">WASD / Arrows · Space = handbrake · R = reset</div>
     </div>
   </div>
+  <div id="mobileControls" class="mobile-controls" aria-hidden="true">
+    <div class="pad-group left">
+      <div id="steerPad" class="pad" aria-label="Steer">
+        <div class="pad-base"></div>
+        <div id="steerThumb" class="pad-thumb"></div>
+      </div>
+      <div class="pad-label">Steer</div>
+    </div>
+    <div class="pad-group right">
+      <div id="throttlePad" class="pad" aria-label="Throttle / Reverse">
+        <div class="pad-base"></div>
+        <div id="throttleThumb" class="pad-thumb"></div>
+      </div>
+      <div class="pad-actions">
+        <button id="brakeBtn" type="button" aria-label="Brake">Brake</button>
+        <button id="resetBtn" type="button" aria-label="Reset car">Reset</button>
+      </div>
+    </div>
+  </div>
   <script type="importmap">
       {
         "imports": {
