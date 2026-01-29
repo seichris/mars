@@ -21,6 +21,18 @@ const ionTerrainToggleEl = document.getElementById("toggleIonTerrain");
 const ionTerrainStateEl = document.getElementById("ionTerrainState");
 const ionTerrainHintEl = document.getElementById("ionTerrainHint");
 const terrainHeightEl = document.getElementById("terrainHeight");
+const helpEl = document.querySelector("#hud .help");
+const mobileControlsEl = document.getElementById("mobileControls");
+const steerPadEl = document.getElementById("steerPad");
+const steerThumbEl = document.getElementById("steerThumb");
+const throttlePadEl = document.getElementById("throttlePad");
+const throttleThumbEl = document.getElementById("throttleThumb");
+const brakeBtnEl = document.getElementById("brakeBtn");
+const resetBtnEl = document.getElementById("resetBtn");
+
+const touchInput = ("ontouchstart" in window)
+  || (navigator.maxTouchPoints ?? 0) > 0
+  || (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
 
 const params = new URLSearchParams(window.location.search);
 const debug = params.has("debug");
@@ -400,6 +412,16 @@ async function main() {
   app.appendChild(renderer.domElement);
   renderer.domElement.tabIndex = 0;
   renderer.domElement.addEventListener("pointerdown", () => renderer.domElement.focus());
+  if (touchInput) {
+    document.body.classList.add("touch-input");
+    if (mobileControlsEl) mobileControlsEl.setAttribute("aria-hidden", "false");
+    if (helpEl) {
+      helpEl.textContent = "Touch: left pad steer · right pad throttle/reverse · Brake = handbrake · Reset";
+    }
+    document.body.style.touchAction = "none";
+    renderer.domElement.style.touchAction = "none";
+    renderer.domElement.style.userSelect = "none";
+  }
 
   const scene = new THREE.Scene();
 
@@ -1552,7 +1574,134 @@ async function main() {
     left: false,
     right: false,
     brake: false,
+    steer: 0,
+    throttle: 0,
   };
+
+  let resetTouchControls = () => {};
+
+  const applyDeadzone = (value, deadzone) => {
+    const magnitude = Math.abs(value);
+    if (magnitude <= deadzone) return 0;
+    const scaled = (magnitude - deadzone) / (1 - deadzone);
+    return Math.sign(value) * clamp(scaled, 0, 1);
+  };
+
+  function setupTouchPad(padEl, thumbEl, onInput) {
+    if (!padEl || !thumbEl) return () => {};
+    let activePointerId = null;
+    let rect = null;
+
+    const update = (event) => {
+      if (activePointerId === null || event.pointerId !== activePointerId) return;
+      if (!rect) rect = padEl.getBoundingClientRect();
+      const maxRadius = Math.min(rect.width, rect.height) * 0.42;
+      const dx = event.clientX - rect.left - rect.width / 2;
+      const dy = event.clientY - rect.top - rect.height / 2;
+      const distance = Math.hypot(dx, dy);
+      const scale = distance > maxRadius ? maxRadius / distance : 1;
+      const clampedX = dx * scale;
+      const clampedY = dy * scale;
+      thumbEl.style.transform = `translate(-50%, -50%) translate(${clampedX}px, ${clampedY}px)`;
+      const normalizedX = clamp(clampedX / maxRadius, -1, 1);
+      const normalizedY = clamp(clampedY / maxRadius, -1, 1);
+      onInput(normalizedX, normalizedY);
+    };
+
+    const reset = () => {
+      activePointerId = null;
+      rect = null;
+      padEl.classList.remove("active");
+      thumbEl.style.transform = "translate(-50%, -50%)";
+      onInput(0, 0);
+    };
+
+    const onPointerDown = (event) => {
+      if (activePointerId !== null) return;
+      activePointerId = event.pointerId;
+      rect = padEl.getBoundingClientRect();
+      padEl.setPointerCapture(activePointerId);
+      padEl.classList.add("active");
+      update(event);
+      event.preventDefault();
+    };
+
+    const onPointerMove = (event) => {
+      if (activePointerId !== event.pointerId) return;
+      update(event);
+      event.preventDefault();
+    };
+
+    const onPointerUp = (event) => {
+      if (activePointerId !== event.pointerId) return;
+      if (padEl.hasPointerCapture(activePointerId)) {
+        padEl.releasePointerCapture(activePointerId);
+      }
+      reset();
+      event.preventDefault();
+    };
+
+    padEl.addEventListener("pointerdown", onPointerDown);
+    padEl.addEventListener("pointermove", onPointerMove);
+    padEl.addEventListener("pointerup", onPointerUp);
+    padEl.addEventListener("pointercancel", onPointerUp);
+    padEl.addEventListener("lostpointercapture", reset);
+    padEl.addEventListener("contextmenu", (event) => event.preventDefault());
+
+    return reset;
+  }
+
+  function setupTouchControls() {
+    if (!touchInput || !mobileControlsEl) return;
+
+    const resetSteerPad = setupTouchPad(steerPadEl, steerThumbEl, (x) => {
+      controls.steer = applyDeadzone(-x, 0.08);
+      if (Math.abs(controls.steer) > 0.01 && chassisBody) {
+        chassisBody.wakeUp();
+      }
+    });
+
+    const resetThrottlePad = setupTouchPad(throttlePadEl, throttleThumbEl, (x, y) => {
+      controls.throttle = applyDeadzone(-y, 0.1);
+      if (Math.abs(controls.throttle) > 0.01 && chassisBody) {
+        chassisBody.wakeUp();
+      }
+    });
+
+    const releaseBrake = () => {
+      controls.brake = false;
+      if (brakeBtnEl) brakeBtnEl.classList.remove("active");
+    };
+
+    if (brakeBtnEl) {
+      const onBrakeDown = (event) => {
+        controls.brake = true;
+        brakeBtnEl.classList.add("active");
+        if (chassisBody) chassisBody.wakeUp();
+        event.preventDefault();
+      };
+      const onBrakeUp = (event) => {
+        releaseBrake();
+        if (event) event.preventDefault();
+      };
+      brakeBtnEl.addEventListener("pointerdown", onBrakeDown);
+      brakeBtnEl.addEventListener("pointerup", onBrakeUp);
+      brakeBtnEl.addEventListener("pointercancel", onBrakeUp);
+      brakeBtnEl.addEventListener("pointerleave", onBrakeUp);
+    }
+
+    if (resetBtnEl) {
+      resetBtnEl.addEventListener("click", () => resetCar());
+    }
+
+    resetTouchControls = () => {
+      resetSteerPad();
+      resetThrottlePad();
+      releaseBrake();
+    };
+  }
+
+  setupTouchControls();
 
   let zoomFactor = Number(zoomEl?.value ?? 5000);
   const updateZoomLabel = () => {
@@ -2792,6 +2941,28 @@ function disableCogTerrain() {
   // Auto-enable terrain on page load
   enableCogTerrain();
 
+  function resetCar() {
+    if (!chassisBody) return;
+    const { lat: resetLat, lon: resetLon } = chassisToLatLon(chassisBody, travelScale);
+    const resetPos = latLonToChassis(resetLat, resetLon, travelScale);
+    const resetHeight = physicsTerrain?.getHeightAt?.(resetLat, resetLon)
+      ?? (terrainHeightValid ? cachedTerrainHeight : null);
+    const resetY = Number.isFinite(resetHeight)
+      ? resetHeight / travelScale + initialY
+      : chassisBody.position.y;
+    chassisBody.position.set(
+      resetPos.x,
+      resetY,
+      resetPos.z,
+    );
+    chassisBody.velocity.setZero();
+    chassisBody.angularVelocity.setZero();
+    chassisBody.quaternion.set(0, 0, 0, 1);
+    carRoot.visible = true;
+    spawnPending = false;
+    carSpawned = true;
+  }
+
   function handleKey(event, isDown) {
     const code = event.code || event.key;
     switch (code) {
@@ -2823,25 +2994,8 @@ function disableCogTerrain() {
         controls.brake = isDown;
         break;
       case "KeyR":
-        if (isDown && chassisBody) {
-          const { lat: resetLat, lon: resetLon } = chassisToLatLon(chassisBody, travelScale);
-          const resetPos = latLonToChassis(resetLat, resetLon, travelScale);
-          const resetHeight = physicsTerrain?.getHeightAt?.(resetLat, resetLon)
-            ?? (terrainHeightValid ? cachedTerrainHeight : null);
-          const resetY = Number.isFinite(resetHeight)
-            ? resetHeight / travelScale + initialY
-            : chassisBody.position.y;
-          chassisBody.position.set(
-            resetPos.x,
-            resetY,
-            resetPos.z,
-          );
-          chassisBody.velocity.setZero();
-          chassisBody.angularVelocity.setZero();
-          chassisBody.quaternion.set(0, 0, 0, 1);
-          carRoot.visible = true;
-          spawnPending = false;
-          carSpawned = true;
+        if (isDown) {
+          resetCar();
         }
         break;
       case "KeyF":
@@ -2868,6 +3022,9 @@ function disableCogTerrain() {
     controls.left = false;
     controls.right = false;
     controls.brake = false;
+    controls.steer = 0;
+    controls.throttle = 0;
+    resetTouchControls();
   });
 
   const cameraOffset = new THREE.Vector3(0, 4.5, -10);
@@ -2895,9 +3052,10 @@ function disableCogTerrain() {
     // ─────────────────────────────────────────────────────────────────────────
     // STEERING: Speed-dependent steering with smooth response
     // ─────────────────────────────────────────────────────────────────────────
-    const steerInput = (controls.left ? 1 : 0) + (controls.right ? -1 : 0);
+    const digitalSteer = (controls.left ? 1 : 0) + (controls.right ? -1 : 0);
+    const steerInput = Math.abs(controls.steer) > 0.01 ? controls.steer : digitalSteer;
     const effectiveMaxSteer = getEffectiveSteerAngle(1, speed, VEHICLE_CONFIG);
-    const targetSteer = steerInput * effectiveMaxSteer;
+    const targetSteer = clamp(steerInput, -1, 1) * effectiveMaxSteer;
     steer += (targetSteer - steer) * Math.min(1, delta * VEHICLE_CONFIG.steerResponseRate);
 
     const canDrive = !spawnPending;
@@ -2943,14 +3101,18 @@ function disableCogTerrain() {
       forwardSpeed = forwardDir.dot(chassisBody.velocity);
     }
 
+    const analogThrottle = Math.abs(controls.throttle) > 0.02 ? controls.throttle : 0;
+    const forwardInput = analogThrottle > 0 ? analogThrottle : (controls.forward ? 1 : 0);
+    const backwardInput = analogThrottle < 0 ? -analogThrottle : (controls.backward ? 1 : 0);
+
     if (canDrive) {
-      if (controls.forward) {
-        engineForce = -baseEngineForce * powerCurve * turnBoost;
-      } else if (controls.backward) {
+      if (forwardInput > 0) {
+        engineForce = -baseEngineForce * powerCurve * turnBoost * forwardInput;
+      } else if (backwardInput > 0) {
         if (forwardSpeed > 0.5) {
-          brakeFactor = 1;
+          brakeFactor = backwardInput;
         } else {
-          engineForce = baseEngineForce * 0.5 * powerCurve * turnBoost; // Reverse is weaker
+          engineForce = baseEngineForce * 0.5 * powerCurve * turnBoost * backwardInput; // Reverse is weaker
         }
       }
     } else {
@@ -3023,7 +3185,9 @@ function disableCogTerrain() {
 
 	    // Debug logging for wheel contact issues (post-step, so it's aligned with current raycasts)
 	    const wheelsOnGround = vehicle ? vehicle.numWheelsOnGround : 0;
-	    const throttlePressed = controls.forward || controls.backward;
+	    const throttlePressed = controls.forward
+        || controls.backward
+        || Math.abs(controls.throttle) > 0.05;
 	    if (throttlePressed && wheelsOnGround === 0) {
 	      const now = performance.now();
 	      if (!animate.lastNoContactLogAt || now - animate.lastNoContactLogAt > 1000) {

@@ -218,7 +218,7 @@ async function resolveTileHostFromKmlDescriptor() {
 	const imageryViewer = new Cesium.Viewer("cesiumContainer", {
 		globe: new Cesium.Globe(marsEllipsoid),
 		baseLayer,
-		terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+		terrainProvider: new Cesium.EllipsoidTerrainProvider({ ellipsoid: marsEllipsoid }),
 		contextOptions: {
 			alpha: true,
 		},
@@ -253,151 +253,222 @@ async function resolveTileHostFromKmlDescriptor() {
 	imageryViewer.scene.globe.ellipsoid = marsEllipsoid;
 	imageryViewer.scene.globe.enableLighting = false;
 	imageryViewer.scene.globe.showGroundAtmosphere = false;
+	imageryViewer.scene.globe.baseColor = Cesium.Color.fromBytes(30, 30, 30);
 	imageryViewer.scene.skyAtmosphere.show = false;
 	imageryViewer.scene.skyBox.show = false;
 	imageryViewer.scene.sun.show = false;
 	imageryViewer.scene.moon.show = false;
 	imageryViewer.scene.backgroundColor = Cesium.Color.BLACK;
 
-	// Optional: Enable DEM terrain from Cesium ion
-	const toggleIonMarsEl = document.getElementById("toggleIonMars");
-	const ionMarsStateEl = document.getElementById("ionMarsState");
-	const ionMarsHintEl = document.getElementById("ionMarsHint");
-	let ionMarsEnabled = false;
-	const serverToken = (window.__CESIUM_ION_TOKEN ?? "").trim();
-	// User's uploaded DEM terrain asset
-	const ION_TERRAIN_ASSET_ID = 4384856;
+	// Optional: Enable DEM terrain from local COG (Valles Marineris region)
+	const toggleDemTerrainEl = document.getElementById("toggleIonMars");
+	const demTerrainStateEl = document.getElementById("ionMarsState");
+	const demTerrainHintEl = document.getElementById("ionMarsHint");
+	let demTerrainEnabled = false;
 	let originalTerrainProvider = null;
-	if (serverToken) {
-		Cesium.Ion.defaultAccessToken = serverToken;
-	}
+	let demTerrainProvider = null;
 
-	function setIonMarsUi(enabled) {
-		ionMarsEnabled = enabled;
-		if (ionMarsStateEl) {
-			ionMarsStateEl.textContent = enabled ? "on" : "off";
-			ionMarsStateEl.classList.toggle("on", enabled);
+	const DEM_TERRAIN_SEGMENTS = 32;
+	const DEM_TERRAIN_WIDTH = DEM_TERRAIN_SEGMENTS + 1;
+	const DEM_TERRAIN_HEIGHT = DEM_TERRAIN_SEGMENTS + 1;
+	const DEM_TERRAIN_BOUNDS = {
+		west: -180,
+		east: 0,
+		south: -55,
+		north: 55,
+	};
+	const DEM_TERRAIN_EMPTY = new Float32Array(DEM_TERRAIN_WIDTH * DEM_TERRAIN_HEIGHT);
+
+	let terrainWorker = null;
+	let terrainWorkerReady = false;
+	let terrainWorkerFailed = false;
+	let terrainWorkerReadyPromise = null;
+	let terrainWorkerReadyResolve = null;
+	let terrainWorkerReqId = 1;
+	const terrainWorkerRequests = new Map();
+
+	function setDemTerrainUi(enabled) {
+		demTerrainEnabled = enabled;
+		if (demTerrainStateEl) {
+			demTerrainStateEl.textContent = enabled ? "on" : "off";
+			demTerrainStateEl.classList.toggle("on", enabled);
 		}
 	}
 
-	async function ensureIonToken() {
-		if (serverToken) return serverToken;
-		const existing = (localStorage.getItem("CESIUM_ION_TOKEN") ?? "").trim();
-		if (existing) return existing;
-		const entered = (window.prompt("Enter Cesium ion access token (will be saved in localStorage):") ?? "")
-			.trim();
-		if (!entered) return null;
-		localStorage.setItem("CESIUM_ION_TOKEN", entered);
-		return entered;
+	function initTerrainWorker() {
+		if (terrainWorker || terrainWorkerFailed) return;
+		try {
+			terrainWorker = new Worker(new URL("./terrain-worker.js", window.location.href), {
+				type: "module",
+			});
+		} catch (err) {
+			terrainWorkerFailed = true;
+			// eslint-disable-next-line no-console
+			console.warn("[view-mars] terrain worker init failed:", err);
+			return;
+		}
+		terrainWorkerReadyPromise = new Promise((resolve) => {
+			terrainWorkerReadyResolve = resolve;
+		});
+		terrainWorker.onmessage = (event) => {
+			const { type } = event.data ?? {};
+			if (type === "ready") {
+				const { error } = event.data ?? {};
+				terrainWorkerReady = !error;
+				terrainWorkerFailed = Boolean(error);
+				if (error) {
+					// eslint-disable-next-line no-console
+					console.warn("[view-mars] terrain worker ready error:", error);
+				}
+				if (terrainWorkerReadyResolve) {
+					terrainWorkerReadyResolve(terrainWorkerReady);
+					terrainWorkerReadyResolve = null;
+				}
+				return;
+			}
+			if (type === "sampleGridResult") {
+				const { id, heights } = event.data;
+				const entry = terrainWorkerRequests.get(id);
+				if (!entry) return;
+				terrainWorkerRequests.delete(id);
+				const data = heights ? new Float32Array(heights) : null;
+				entry.resolve(data);
+				return;
+			}
+			if (type === "sampleGridError") {
+				const { id, message } = event.data;
+				const entry = terrainWorkerRequests.get(id);
+				if (!entry) return;
+				terrainWorkerRequests.delete(id);
+				// eslint-disable-next-line no-console
+				console.warn("[view-mars] terrain worker sample error:", message);
+				entry.resolve(null);
+			}
+		};
+		terrainWorker.onerror = (err) => {
+			terrainWorkerFailed = true;
+			if (terrainWorkerReadyResolve) {
+				terrainWorkerReadyResolve(false);
+				terrainWorkerReadyResolve = null;
+			}
+			// eslint-disable-next-line no-console
+			console.warn("[view-mars] terrain worker error:", err);
+		};
+		terrainWorker.postMessage({ type: "init", url: "/terrain/cog" });
 	}
 
-	function describeIonError(err) {
-		if (!err) return "Unknown error.";
-		if (err.message) return err.message;
-		if (err.statusCode) return `HTTP ${err.statusCode}`;
-		if (err.response?.statusCode) return `HTTP ${err.response.statusCode}`;
-		return String(err);
+	function ensureTerrainWorkerReady() {
+		if (terrainWorkerReady) return Promise.resolve(true);
+		initTerrainWorker();
+		if (terrainWorkerFailed || !terrainWorker) return Promise.resolve(false);
+		return terrainWorkerReadyPromise ?? Promise.resolve(false);
 	}
 
-	async function enableIonMars() {
-		const token = await ensureIonToken();
-		if (!token) {
-			if (ionMarsHintEl) ionMarsHintEl.textContent = "No token provided. Terrain remains off.";
+	async function requestTerrainGrid(bounds) {
+		const ready = await ensureTerrainWorkerReady();
+		if (!ready || !terrainWorker) return null;
+		const id = terrainWorkerReqId++;
+		return new Promise((resolve) => {
+			terrainWorkerRequests.set(id, { resolve });
+			terrainWorker.postMessage({
+				type: "sampleGrid",
+				id,
+				bounds,
+				segments: DEM_TERRAIN_SEGMENTS,
+			});
+		});
+	}
+
+	function rectangleToBounds(rectangle) {
+		return {
+			west: Cesium.Math.toDegrees(rectangle.west),
+			east: Cesium.Math.toDegrees(rectangle.east),
+			south: Cesium.Math.toDegrees(rectangle.south),
+			north: Cesium.Math.toDegrees(rectangle.north),
+		};
+	}
+
+	function intersectsTerrain(bounds) {
+		return !(
+			bounds.east < DEM_TERRAIN_BOUNDS.west ||
+			bounds.west > DEM_TERRAIN_BOUNDS.east ||
+			bounds.north < DEM_TERRAIN_BOUNDS.south ||
+			bounds.south > DEM_TERRAIN_BOUNDS.north
+		);
+	}
+
+	function emptyHeightmap() {
+		return new Float32Array(DEM_TERRAIN_EMPTY);
+	}
+
+	function getDemTerrainProvider() {
+		if (demTerrainProvider) return demTerrainProvider;
+		demTerrainProvider = new Cesium.CustomHeightmapTerrainProvider({
+			width: DEM_TERRAIN_WIDTH,
+			height: DEM_TERRAIN_HEIGHT,
+			tilingScheme,
+			callback: async (x, y, level) => {
+				const rectangle = tilingScheme.tileXYToRectangle(x, y, level);
+				const bounds = rectangleToBounds(rectangle);
+				if (!intersectsTerrain(bounds)) {
+					return emptyHeightmap();
+				}
+				const heights = await requestTerrainGrid(bounds);
+				return heights ?? emptyHeightmap();
+			},
+		});
+		return demTerrainProvider;
+	}
+
+	async function enableDemTerrain() {
+		if (!originalTerrainProvider) {
+			originalTerrainProvider = imageryViewer.terrainProvider;
+		}
+		if (demTerrainHintEl) demTerrainHintEl.textContent = "Loading DEM terrain from /terrain/cog...";
+		statusEl.textContent = "Loading DEM terrain...";
+
+		const ready = await ensureTerrainWorkerReady();
+		if (!ready) {
+			setDemTerrainUi(false);
+			statusEl.textContent = "Terrain server unavailable.";
+			if (demTerrainHintEl) demTerrainHintEl.textContent = "Terrain server unavailable.";
 			return;
 		}
 
-		Cesium.Ion.defaultAccessToken = token;
-		if (ionMarsHintEl) ionMarsHintEl.textContent = "Loading DEM terrain from ion…";
-		statusEl.textContent = "Loading DEM terrain (ion)…";
+		imageryViewer.terrainProvider = getDemTerrainProvider();
+		imageryViewer.scene.verticalExaggeration = 1.0;
+		imageryViewer.scene.globe.depthTestAgainstTerrain = true;
 
-		try {
-			// Save the original terrain provider so we can restore it later
-			if (!originalTerrainProvider) {
-				originalTerrainProvider = imageryViewer.terrainProvider;
-			}
-
-			// Load the user's DEM terrain from Cesium ion
-			const terrainProvider = await Cesium.CesiumTerrainProvider.fromIonAssetId(ION_TERRAIN_ASSET_ID);
-
-			// Debug: Log terrain provider details
-			// eslint-disable-next-line no-console
-			console.log("[view-mars] Terrain provider loaded:", {
-				assetId: ION_TERRAIN_ASSET_ID,
-				ready: terrainProvider.ready,
-				hasWaterMask: terrainProvider.hasWaterMask,
-				hasVertexNormals: terrainProvider.hasVertexNormals,
-				tilingScheme: terrainProvider.tilingScheme?.constructor?.name,
-				ellipsoid: terrainProvider.tilingScheme?.ellipsoid?.radii,
-				availability: terrainProvider.availability ? "yes" : "no",
-			});
-
-			// Replace the terrain provider - Handmer imagery will automatically drape over it
-			imageryViewer.terrainProvider = terrainProvider;
-
-			// Enable terrain exaggeration to make it more visible (optional)
-			imageryViewer.scene.verticalExaggeration = 1.0; // Set to 2.0 or higher to exaggerate
-
-			// Make sure the globe is using terrain
-			imageryViewer.scene.globe.depthTestAgainstTerrain = true;
-
-			setIonMarsUi(true);
-			statusEl.textContent = "DEM terrain enabled (ion).";
-			if (ionMarsHintEl) {
-				ionMarsHintEl.textContent = "DEM terrain enabled. Zoom in and tilt to see relief with Handmer imagery.";
-			}
-
-			// eslint-disable-next-line no-console
-			console.log("[view-mars] DEM terrain provider loaded from asset", ION_TERRAIN_ASSET_ID);
-
-			// Test sample a height to verify terrain data is accessible
-			try {
-				const testPos = [Cesium.Cartographic.fromDegrees(-59.2, -13.74)]; // Near default spawn
-				const sampled = await Cesium.sampleTerrainMostDetailed(terrainProvider, testPos);
-				// eslint-disable-next-line no-console
-				console.log("[view-mars] Test height sample:", {
-					lat: testPos[0].latitude * 180 / Math.PI,
-					lon: testPos[0].longitude * 180 / Math.PI,
-					height: sampled[0].height,
-				});
-			} catch (sampleErr) {
-				// eslint-disable-next-line no-console
-				console.warn("[view-mars] Test height sample failed:", sampleErr);
-			}
-		} catch (err) {
-			setIonMarsUi(false);
-			const message = describeIonError(err);
-			statusEl.textContent = `Failed to load DEM terrain: ${message}`;
-			// eslint-disable-next-line no-console
-			console.error("[view-mars] terrain provider error:", err);
-			if (ionMarsHintEl) ionMarsHintEl.textContent = `Failed to load: ${message}`;
+		setDemTerrainUi(true);
+		statusEl.textContent = "DEM terrain enabled (COG).";
+		if (demTerrainHintEl) {
+			demTerrainHintEl.textContent =
+				"DEM terrain enabled for Valles Marineris. Zoom in and tilt to see relief.";
 		}
 	}
 
-	function disableIonMars() {
-		// Restore the original ellipsoid terrain provider
+	function disableDemTerrain() {
 		if (originalTerrainProvider) {
 			imageryViewer.terrainProvider = originalTerrainProvider;
 		}
 
-		setIonMarsUi(false);
+		setDemTerrainUi(false);
 		statusEl.textContent = proxyAvailable ? "Using local tile proxy (/tiles)." : "Using remote tiles.";
-		if (ionMarsHintEl) {
-			ionMarsHintEl.textContent = serverToken
-				? "Using CESIUM_TOKEN from server .env."
-				: "Requires a Cesium ion access token.";
+		if (demTerrainHintEl) {
+			demTerrainHintEl.textContent = "Terrain available around Valles Marineris. Click to enable.";
 		}
 	}
 
-	if (toggleIonMarsEl) {
-		toggleIonMarsEl.addEventListener("click", (e) => {
+	if (toggleDemTerrainEl) {
+		toggleDemTerrainEl.addEventListener("click", (e) => {
 			e.preventDefault();
-			if (ionMarsEnabled) disableIonMars();
-			else enableIonMars();
+			if (demTerrainEnabled) disableDemTerrain();
+			else enableDemTerrain();
 		});
 	}
-	setIonMarsUi(false);
-	if (ionMarsHintEl) {
-		if (serverToken) ionMarsHintEl.textContent = "Using CESIUM_TOKEN from server .env.";
+	setDemTerrainUi(false);
+	if (demTerrainHintEl) {
+		demTerrainHintEl.textContent = "Terrain available around Valles Marineris. Click to enable.";
 	}
 
 	if (debug) {
@@ -411,13 +482,20 @@ async function resolveTileHostFromKmlDescriptor() {
 		imageryViewer.resize();
 	});
 
-	const startView = {
-		destination: Cesium.Cartesian3.fromDegrees(0, 0, marsEllipsoid.maximumRadius * 4.0, marsEllipsoid),
-		orientation: {
-			heading: 0.0,
-			pitch: -Cesium.Math.PI_OVER_TWO,
-			roll: 0.0,
-		},
-	};
-	imageryViewer.camera.setView(startView);
+	const startTarget = Cesium.Cartesian3.fromDegrees(-60, -14, 0, marsEllipsoid);
+	const startRange = 1800000;
+	imageryViewer.camera.lookAt(
+		startTarget,
+		new Cesium.HeadingPitchRange(0.0, Cesium.Math.toRadians(-50), startRange),
+	);
+	imageryViewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+
+	if (debug) {
+		const camCarto = Cesium.Cartographic.fromCartesian(
+			imageryViewer.camera.position,
+			marsEllipsoid,
+		);
+		// eslint-disable-next-line no-console
+		console.log("[view-mars] camera height (m):", camCarto.height);
+	}
 })();
