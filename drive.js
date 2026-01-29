@@ -1655,7 +1655,7 @@ async function main() {
     if (!touchInput || !mobileControlsEl) return;
 
     const resetSteerPad = setupTouchPad(steerPadEl, steerThumbEl, (x) => {
-      controls.steer = applyDeadzone(x, 0.08);
+      controls.steer = applyDeadzone(-x, 0.08);
       if (Math.abs(controls.steer) > 0.01 && chassisBody) {
         chassisBody.wakeUp();
       }
